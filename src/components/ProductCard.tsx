@@ -95,7 +95,7 @@ export default function ProductCard({ product, index }: ProductCardProps) {
           {imgMeta && !imgMeta.hasBg ? (
             <div 
               className="w-full h-full flex items-center justify-center p-8"
-              style={{ backgroundColor: imgMeta.dominantColor.replace('rgb', 'rgba').replace(')', ', 0.15)') }}
+              style={{ backgroundColor: imgMeta.dominantColor ? imgMeta.dominantColor.replace('rgb', 'rgba').replace(')', ', 0.15)') : 'rgba(255, 255, 255, 0.05)' }}
             >
               <div className="absolute inset-0 opacity-[0.02]" style={{ backgroundImage: 'radial-gradient(circle, white 1px, transparent 1px)', backgroundSize: '24px 24px' }} />
               <img 
