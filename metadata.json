@@ -1,0 +1,6 @@
+{
+  "name": "Scrollr",
+  "description": "TikTok-style fullscreen vertical scroll feed for minimalist affiliate product discovery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["Product Catalog", "Vertical Video UI", "Real-time Search"]
+}
