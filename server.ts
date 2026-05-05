@@ -5,7 +5,21 @@ import axios from "axios";
 import sharp from "sharp";
 import dotenv from "dotenv";
 import Redis from "ioredis";
-import { Pool } from "pg";
+import { initializeApp } from "firebase/app";
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  doc,
+  setDoc,
+  getDocs,
+  query,
+  orderBy,
+  limit as fsLimit,
+  getCountFromServer,
+  where
+} from "firebase/firestore";
+import fs from "fs";
 
 dotenv.config();
 
@@ -33,47 +47,20 @@ if (
 }
 
 const redis = parsedRedisUrl ? new Redis(parsedRedisUrl, redisOpts) : null;
-const pool = process.env.DATABASE_URL
-  ? new Pool({ connectionString: process.env.DATABASE_URL })
-  : null;
+const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
+let db: any = null;
 
-if (pool) {
-  // Initialize simple tracking table if not exists
-  pool
-    .query(
-      `
-    CREATE TABLE IF NOT EXISTS click_tracking (
-      id SERIAL PRIMARY KEY,
-      product_id TEXT NOT NULL,
-      session_id TEXT,
-      source TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `,
-    )
-    .catch((err) => console.error("Postgres tracking init error:", err));
-
-  pool
-    .query(
-      `
-    CREATE TABLE IF NOT EXISTS products (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      category TEXT,
-      image_url TEXT,
-      price NUMERIC,
-      original_price NUMERIC,
-      currency TEXT,
-      rating NUMERIC,
-      review_count INTEGER,
-      specs JSONB,
-      affiliate_url TEXT,
-      campaign_id TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `,
-    )
-    .catch((err) => console.error("Postgres products init error:", err));
+try {
+  if (fs.existsSync(firebaseConfigPath)) {
+    const firebaseConfig = JSON.parse(
+      fs.readFileSync(firebaseConfigPath, "utf-8")
+    );
+    const firebaseApp = initializeApp(firebaseConfig);
+    db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+    console.log("Firebase Firestore initialized successfully.");
+  }
+} catch (err) {
+  console.error("Firebase init failed:", err);
 }
 
 const app = express();
@@ -175,7 +162,7 @@ function normalizeProduct(raw: any, sid: string) {
 
 let isSyncing = false;
 async function syncImpactProducts() {
-  if (!pool || !hasImpactCreds || isSyncing) return;
+  if (!db || !hasImpactCreds || isSyncing) return;
   isSyncing = true;
   console.log("Background Sync: Fetching products from Impact API...");
 
@@ -235,29 +222,20 @@ async function syncImpactProducts() {
           const p = normalizeProduct(raw, sid);
           if (!p.imageUrl || p.price === 0) continue; // Skip bad data
 
-          await pool
-            .query(
-              `
-               INSERT INTO products (id, name, category, image_url, price, original_price, currency, rating, review_count, specs, affiliate_url, campaign_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-               ON CONFLICT (id) DO UPDATE SET price = EXCLUDED.price, image_url = EXCLUDED.image_url, affiliate_url = EXCLUDED.affiliate_url
-             `,
-              [
-                p.id,
-                p.name,
-                p.category,
-                p.imageUrl,
-                p.price,
-                p.originalPrice,
-                p.currency,
-                p.rating,
-                p.reviewCount,
-                JSON.stringify(p.specs),
-                p.affiliateUrl,
-                p.campaignId,
-              ],
-            )
-            .catch(() => {});
+          await setDoc(doc(db, "products", p.id), {
+            id: p.id,
+            name: p.name,
+            category: p.category,
+            imageUrl: p.imageUrl,
+            price: p.price,
+            originalPrice: p.originalPrice,
+            currency: p.currency,
+            rating: p.rating,
+            reviewCount: p.reviewCount,
+            specs: p.specs,
+            affiliateUrl: p.affiliateUrl,
+            campaignId: p.campaignId,
+          }, { merge: true }).catch(() => {});
         }
       }
     }
@@ -272,11 +250,11 @@ async function syncImpactProducts() {
 // API Routes
 app.get("/api/feed", async (req, res) => {
   try {
-    if (pool) {
+    if (db) {
       let count = 0;
       try {
-        const c = await pool.query("SELECT COUNT(*) FROM products");
-        count = parseInt(c.rows[0].count, 10);
+        const snapshot = await getCountFromServer(collection(db, "products"));
+        count = snapshot.data().count;
       } catch (e) {}
 
       if (count < 100 || Math.random() < 0.2) {
@@ -284,28 +262,10 @@ app.get("/api/feed", async (req, res) => {
       }
 
       if (count > 0) {
-        const result = await pool.query(
-          "SELECT * FROM products ORDER BY RANDOM() LIMIT 20",
-        );
-        const products = result.rows.map((row) => ({
-          id: row.id,
-          name: row.name,
-          category: row.category,
-          imageUrl: row.image_url,
-          price: parseFloat(row.price),
-          originalPrice: row.original_price
-            ? parseFloat(row.original_price)
-            : null,
-          currency: row.currency,
-          rating: row.rating ? parseFloat(row.rating) : 4.8,
-          reviewCount: row.review_count,
-          specs:
-            typeof row.specs === "string"
-              ? JSON.parse(row.specs)
-              : row.specs || [],
-          affiliateUrl: row.affiliate_url,
-          campaignId: row.campaign_id,
-        }));
+        const q = query(collection(db, "products"), fsLimit(50));
+        const snapshot = await getDocs(q);
+        let products = snapshot.docs.map(doc => doc.data());
+        products = products.sort(() => Math.random() - 0.5).slice(0, 20);
         return res.json(products);
       }
     }
@@ -409,40 +369,21 @@ app.get("/api/feed", async (req, res) => {
 
 app.get("/api/search", async (req, res) => {
   try {
-    const query = req.query.q as string;
-    if (!query) return res.json([]);
+    const searchQuery = req.query.q as string;
+    if (!searchQuery) return res.json([]);
 
-    if (pool) {
+    if (db) {
       try {
-        const result = await pool.query(
-          `
-             SELECT * FROM products 
-             WHERE name ILIKE $1 OR category ILIKE $1 OR specs::text ILIKE $1
-             ORDER BY RANDOM() LIMIT 20
-           `,
-          [`%${query}%`],
-        );
+        const q = query(collection(db, "products"), fsLimit(200));
+        const snapshot = await getDocs(q);
+        let products = snapshot.docs.map(doc => doc.data() as any);
+        products = products.filter(p => 
+          (p.name && p.name.toLowerCase().includes(searchQuery.toLowerCase())) ||
+          (p.category && p.category.toLowerCase().includes(searchQuery.toLowerCase())) ||
+          (p.specs && JSON.stringify(p.specs).toLowerCase().includes(searchQuery.toLowerCase()))
+        ).slice(0, 20);
 
-        if (result.rows.length > 0) {
-          const products = result.rows.map((row) => ({
-            id: row.id,
-            name: row.name,
-            category: row.category,
-            imageUrl: row.image_url,
-            price: parseFloat(row.price),
-            originalPrice: row.original_price
-              ? parseFloat(row.original_price)
-              : null,
-            currency: row.currency,
-            rating: row.rating ? parseFloat(row.rating) : 4.8,
-            reviewCount: row.review_count,
-            specs:
-              typeof row.specs === "string"
-                ? JSON.parse(row.specs)
-                : row.specs || [],
-            affiliateUrl: row.affiliate_url,
-            campaignId: row.campaign_id,
-          }));
+        if (products.length > 0) {
           return res.json(products);
         }
       } catch (e) {}
@@ -512,8 +453,8 @@ app.get("/api/search", async (req, res) => {
 
     const products = generateMockProducts(10, 0).filter(
       (p) =>
-        p.name.toLowerCase().includes(query.toLowerCase()) ||
-        p.category.toLowerCase().includes(query.toLowerCase()),
+        p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        p.category.toLowerCase().includes(searchQuery.toLowerCase()),
     );
     res.json(products);
   } catch (error) {
@@ -564,13 +505,17 @@ app.post("/api/track", async (req, res) => {
   const { productId, source, sessionId } = req.body;
   console.log("Tracking click:", req.body);
 
-  if (pool) {
-    await pool
-      .query(
-        "INSERT INTO click_tracking (product_id, source, session_id) VALUES ($1, $2, $3)",
-        [productId, source, sessionId || null],
-      )
-      .catch((err) => console.error("Tracking db error:", err));
+  if (db) {
+    try {
+      await addDoc(collection(db, "click_tracking"), {
+        product_id: productId,
+        source: source,
+        session_id: sessionId || null,
+        created_at: new Date().toISOString()
+      });
+    } catch (err) {
+      console.error("Tracking db error:", err);
+    }
   }
 
   res.status(202).send();
