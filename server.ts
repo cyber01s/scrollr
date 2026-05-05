@@ -77,13 +77,15 @@ if (pool) {
     .catch((err) => console.error("Postgres products init error:", err));
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+const app = express();
+const PORT = 3000;
 
-  app.use(express.json());
+app.use(express.json());
 
-  // Impact.com credentials (REQUIRED)
+// Expose app for Vercel
+export default app;
+
+// Impact.com credentials (REQUIRED)
   // Support comma-separated SIDs/Tokens for "all partners" request
   const SIDs = (process.env.IMPACT_ACCOUNT_SID || "")
     .split(",")
@@ -575,7 +577,8 @@ async function startServer() {
     res.status(202).send();
   });
 
-  // Vite middleware for development
+// Vite middleware for development
+async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -596,7 +599,10 @@ async function startServer() {
   });
 }
 
-startServer();
+// Only auto-start if not running as a Vercel serverless function
+if (!process.env.VERCEL) {
+  startServer();
+}
 
 function generateMockProducts(count: number, page: number): any[] {
   const categories = [
